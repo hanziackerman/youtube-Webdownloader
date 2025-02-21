@@ -121,19 +121,50 @@ exports.getPlaylistInfo = async (req, res) => {
         url = convertMusicUrlToRegular(url);
         console.log('Fetching playlist from URL:', url);
 
-        const { stdout } = await execAsync(`"${ytdlpPath}" "${url}" --dump-json --flat-playlist`);
+        // Utiliser yt-dlp avec une configuration adaptée à Windows
+        const command = [
+            `"${ytdlpPath}"`,
+            `"${url}"`,
+            '--flat-playlist',
+            '--no-warnings',
+            '--ignore-errors',
+            '--encoding utf8',
+            '--print',
+            '"%(title)s###%(id)s###%(duration)s"'
+        ].join(' ');
+
+        console.log('Executing command:', command);
+
+        const { stdout } = await execAsync(command, { 
+            encoding: 'utf8',
+            env: { ...process.env, PYTHONIOENCODING: 'utf-8' }
+        });
         
         const videos = stdout.split('\n')
             .filter(line => line.trim())
             .map(line => {
-                const video = JSON.parse(line);
-                return {
-                    url: `https://www.youtube.com/watch?v=${video.id}`,
-                    title: video.title,
-                    thumbnail: video.thumbnail,
-                    duration: video.duration
-                };
-            });
+                try {
+                    // Nettoyer la ligne des guillemets potentiels
+                    const cleanLine = line.replace(/^"|"$/g, '').trim();
+                    const [title, id, duration] = cleanLine.split('###');
+                    
+                    if (!id) {
+                        console.log('Invalid line:', cleanLine);
+                        return null;
+                    }
+
+                    return {
+                        url: `https://www.youtube.com/watch?v=${id}`,
+                        title: title || 'Unknown Title',
+                        thumbnail: `https://i.ytimg.com/vi/${id}/mqdefault.jpg`,
+                        duration: duration || '0'
+                    };
+                } catch (e) {
+                    console.error('Error parsing video info:', e, 'Line:', line);
+                    return null;
+                }
+            })
+            .filter(video => video !== null);
 
         if (!videos || videos.length === 0) {
             return res.status(404).json({ message: 'No videos found in playlist' });
@@ -144,7 +175,8 @@ exports.getPlaylistInfo = async (req, res) => {
         console.error('Error getting playlist info:', error);
         res.status(500).json({ 
             message: 'Error getting playlist information',
-            details: error.message
+            details: error.message,
+            command: error.cmd
         });
     }
 };
@@ -161,13 +193,12 @@ exports.downloadSong = async (req, res) => {
         console.log('Downloading from URL:', url);
 
         // Obtenir les informations de la vidéo
-        const { stdout: videoInfoStr } = await execAsync(`"${ytdlpPath}" "${url}" --dump-json`);
-        const videoInfo = JSON.parse(videoInfoStr);
-        const title = videoInfo.title.replace(/[^\w\s]/gi, '');
+        const { stdout: videoInfoStr } = await execAsync(`"${ytdlpPath}" "${url}" --print "%(title)s"`);
+        const title = videoInfoStr.trim().replace(/[^\w\s]/gi, '');
         const fileName = `${title}.mp3`;
         const filePath = path.join(downloadDir, fileName);
 
-        // Télécharger directement en MP3 avec la meilleure qualité et les métadonnées
+        // Télécharger directement en MP3 avec la meilleure qualité
         const downloadCommand = [
             `"${ytdlpPath}"`,
             `"${url}"`,
@@ -176,9 +207,6 @@ exports.downloadSong = async (req, res) => {
             '--audio-quality 0',
             '--embed-thumbnail',
             '--add-metadata',
-            '--metadata-from-title "%(artist)s - %(title)s"',
-            '--convert-thumbnails jpg',
-            '--embed-metadata',
             '--no-keep-video',
             '--no-playlist',
             `--output "${filePath}"`
@@ -189,7 +217,7 @@ exports.downloadSong = async (req, res) => {
         res.json({
             message: 'Download completed',
             fileName,
-            title: videoInfo.title,
+            title: title,
             directory: downloadDir
         });
     } catch (error) {
